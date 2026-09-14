@@ -1,0 +1,10 @@
+.env
+.env.*
+!.env.example
+
+.idea/
+
+bin/
+tmp/
+coverage.out
+*.test
