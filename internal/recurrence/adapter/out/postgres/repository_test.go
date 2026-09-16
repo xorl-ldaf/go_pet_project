@@ -31,6 +31,12 @@ import (
 
 const recurrenceMigrationsDir = "../../../../../migrations"
 
+var (
+	recurrenceTestInfraOnce      sync.Once
+	recurrenceTestInfraStartErr  error
+	recurrenceTestInfraSkipCause string
+)
+
 func TestRepositoryCreateFindReminderRulesAndClaimDue(t *testing.T) {
 	ctx, pg := setupRecurrencePostgres(t)
 	repo := NewRepository(pg.GORM)
@@ -581,23 +587,45 @@ func recurrenceTestTime() time.Time {
 func startRecurrencePostgres(ctx context.Context, t *testing.T) {
 	t.Helper()
 
+	if usesExternalRecurrenceTestInfrastructure() {
+		return
+	}
+
+	recurrenceTestInfraOnce.Do(func() {
+		recurrenceTestInfraStartErr, recurrenceTestInfraSkipCause = startLocalRecurrencePostgres(ctx)
+	})
+	if recurrenceTestInfraSkipCause != "" {
+		t.Skip(recurrenceTestInfraSkipCause)
+	}
+	if recurrenceTestInfraStartErr != nil {
+		t.Fatal(recurrenceTestInfraStartErr)
+	}
+}
+
+func usesExternalRecurrenceTestInfrastructure() bool {
+	return strings.EqualFold(os.Getenv("TEST_INFRA_EXTERNAL"), "true")
+}
+
+func startLocalRecurrencePostgres(ctx context.Context) (error, string) {
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("Docker CLI is required for postgres recurrence tests")
+		return nil, "Docker CLI is required for postgres recurrence tests"
 	}
 
 	infoCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if output, err := exec.CommandContext(infoCtx, "docker", "info").CombinedOutput(); err != nil {
-		t.Skipf("Docker daemon is required for postgres recurrence tests: %s", strings.TrimSpace(string(output)))
+		return nil, fmt.Sprintf("Docker daemon is required for postgres recurrence tests: %s", strings.TrimSpace(string(output)))
 	}
 
 	composeCtx, composeCancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer composeCancel()
-	cmd := exec.CommandContext(composeCtx, "docker", "compose", "-f", "../../../../../deploy/compose.yaml", "up", "-d", "postgres", "kafka")
+	cmd := exec.CommandContext(composeCtx, "docker", "compose", "-f", "../../../../../deploy/compose.yaml", "up", "-d", "postgres")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("docker compose up: %v: %s", err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("docker compose up: %w: %s", err, strings.TrimSpace(string(output))), ""
 	}
+
+	return nil, ""
 }
 
 func waitForRecurrencePostgres(ctx context.Context, t *testing.T, cfg config.DBConfig) {

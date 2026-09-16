@@ -57,6 +57,7 @@ jobs:
       DB_SSLMODE: disable
       JWT_SECRET: ci-jwt-secret-with-at-least-32-bytes
       KAFKA_BROKERS: localhost:9092
+      TEST_INFRA_EXTERNAL: "true"
     steps:
       - uses: actions/checkout@v5
 

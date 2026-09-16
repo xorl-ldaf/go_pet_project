@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,12 @@ import (
 )
 
 const migrationsDir = "../../migrations"
+
+var (
+	testInfraOnce      sync.Once
+	testInfraStartErr  error
+	testInfraSkipCause string
+)
 
 func TestUserAndRefreshTokenMigrations(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
@@ -97,15 +104,35 @@ func loadConfig(t *testing.T) *config.Config {
 func startPostgres(ctx context.Context, t *testing.T) {
 	t.Helper()
 
+	if usesExternalTestInfrastructure() {
+		return
+	}
+
+	testInfraOnce.Do(func() {
+		testInfraStartErr, testInfraSkipCause = startLocalTestInfrastructure(ctx)
+	})
+	if testInfraSkipCause != "" {
+		t.Skip(testInfraSkipCause)
+	}
+	if testInfraStartErr != nil {
+		t.Fatal(testInfraStartErr)
+	}
+}
+
+func usesExternalTestInfrastructure() bool {
+	return strings.EqualFold(os.Getenv("TEST_INFRA_EXTERNAL"), "true")
+}
+
+func startLocalTestInfrastructure(ctx context.Context) (error, string) {
 	if _, err := exec.LookPath("docker"); err != nil {
-		t.Skip("Docker CLI is required for integration tests")
+		return nil, "Docker CLI is required for integration tests"
 	}
 
 	infoCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	if output, err := exec.CommandContext(infoCtx, "docker", "info").CombinedOutput(); err != nil {
-		t.Skipf("Docker daemon is required for integration tests: %s", strings.TrimSpace(string(output)))
+		return nil, fmt.Sprintf("Docker daemon is required for integration tests: %s", strings.TrimSpace(string(output)))
 	}
 
 	composeCtx, composeCancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -114,8 +141,10 @@ func startPostgres(ctx context.Context, t *testing.T) {
 	cmd := exec.CommandContext(composeCtx, "docker", "compose", "-f", "../../deploy/compose.yaml", "up", "-d", "postgres", "kafka")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		t.Fatalf("docker compose up: %v: %s", err, strings.TrimSpace(string(output)))
+		return fmt.Errorf("docker compose up: %w: %s", err, strings.TrimSpace(string(output))), ""
 	}
+
+	return nil, ""
 }
 
 func waitForPostgres(ctx context.Context, t *testing.T, cfg config.DBConfig) {
