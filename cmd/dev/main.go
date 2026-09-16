@@ -39,7 +39,7 @@ func run(logger *slog.Logger) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	cfg, err := config.Load()
+	cfg, err := config.LoadDev()
 	if err != nil {
 		logger.Error("config loading error", "error", err)
 		return err

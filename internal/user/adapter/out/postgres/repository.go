@@ -9,6 +9,7 @@ import (
 	"go_pet_project/internal/user/domain"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
 )
 
@@ -26,7 +27,7 @@ func (r *Repository) Create(ctx context.Context, user domain.User) (domain.User,
 	model := toModel(user)
 
 	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
-		return domain.User{}, fmt.Errorf("create user: %w", err)
+		return domain.User{}, mapCreateError(err)
 	}
 
 	return toDomain(model), nil
@@ -86,4 +87,18 @@ func mapFindError(operation string, err error) error {
 	}
 
 	return fmt.Errorf("%s: %w", operation, err)
+}
+
+func mapCreateError(err error) error {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		switch pgErr.ConstraintName {
+		case "users_email_key":
+			return fmt.Errorf("create user: %w", domain.ErrEmailAlreadyExists)
+		case "users_username_key":
+			return fmt.Errorf("create user: %w", domain.ErrUsernameAlreadyExists)
+		}
+	}
+
+	return fmt.Errorf("create user: %w", err)
 }

@@ -18,6 +18,11 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	minPasswordBytes = 8
+	maxPasswordBytes = 72
+)
+
 var _ authin.AuthService = (*AuthService)(nil)
 
 type AuthService struct {
@@ -104,6 +109,12 @@ func (s *AuthService) Register(ctx context.Context, cmd command.RegisterCommand)
 
 	created, err := s.users.Create(ctx, user)
 	if err != nil {
+		if errors.Is(err, userdomain.ErrEmailAlreadyExists) {
+			return command.RegisterResult{}, application.ErrEmailAlreadyExists
+		}
+		if errors.Is(err, userdomain.ErrUsernameAlreadyExists) {
+			return command.RegisterResult{}, application.ErrUsernameAlreadyExists
+		}
 		return command.RegisterResult{}, fmt.Errorf("create user: %w", err)
 	}
 
@@ -256,7 +267,7 @@ func validateRegisterCommand(cmd command.RegisterCommand) (string, string, strin
 		return "", "", "", application.ErrInvalidUsername
 	}
 
-	if cmd.Password == "" {
+	if len(cmd.Password) < minPasswordBytes || len(cmd.Password) > maxPasswordBytes {
 		return "", "", "", application.ErrInvalidPassword
 	}
 

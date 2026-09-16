@@ -113,6 +113,38 @@ type MetricsConfig struct {
 }
 
 func Load() (*Config, error) {
+	return loadWithValidation((*Config).validate)
+}
+
+func LoadAPI() (*Config, error) {
+	return loadWithValidation((*Config).validateAPI)
+}
+
+func LoadScheduler() (*Config, error) {
+	return loadWithValidation((*Config).validateSchedulerRuntime)
+}
+
+func LoadNotifier() (*Config, error) {
+	return loadWithValidation((*Config).validateNotifier)
+}
+
+func LoadDev() (*Config, error) {
+	return Load()
+}
+
+func loadWithValidation(validate func(*Config) error) (*Config, error) {
+	cfg, err := loadRaw()
+	if err != nil {
+		return nil, err
+	}
+	if err := validate(cfg); err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
+}
+
+func loadRaw() (*Config, error) {
 	if err := godotenv.Load(); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("load .env: %w", err)
 	}
@@ -203,7 +235,7 @@ func Load() (*Config, error) {
 		}
 	}
 
-	cfg := &Config{
+	return &Config{
 		HTTP: HTTPConfig{
 			Port: httpPort,
 		},
@@ -248,16 +280,85 @@ func Load() (*Config, error) {
 		Metrics: MetricsConfig{
 			Port: metricsPort,
 		},
-	}
-
-	if err := cfg.validate(); err != nil {
-		return nil, err
-	}
-
-	return cfg, nil
+	}, nil
 }
 
 func (c *Config) validate() error {
+	if err := c.validateAPI(); err != nil {
+		return err
+	}
+	if err := c.validateSchedulerRuntime(); err != nil {
+		return err
+	}
+	if err := c.validateNotifier(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Config) validateAPI() error {
+	if err := c.validateHTTP(); err != nil {
+		return err
+	}
+	if err := c.validateDB(); err != nil {
+		return err
+	}
+	if err := c.validateAuth(); err != nil {
+		return err
+	}
+	if c.Kafka.NotificationGroup == "" {
+		return errors.New("KAFKA_NOTIFICATION_CONSUMER_GROUP must not be empty")
+	}
+
+	return nil
+}
+
+func (c *Config) validateSchedulerRuntime() error {
+	if err := c.validateDB(); err != nil {
+		return err
+	}
+	if err := c.validateScheduler(); err != nil {
+		return err
+	}
+	if err := c.validateRecurrence(); err != nil {
+		return err
+	}
+	if err := c.validateKafkaPublisher(); err != nil {
+		return err
+	}
+	if err := c.validateOutbox(); err != nil {
+		return err
+	}
+	if err := c.validateMetrics(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Config) validateNotifier() error {
+	if err := c.validateDB(); err != nil {
+		return err
+	}
+	if err := c.validateKafkaConsumer(); err != nil {
+		return err
+	}
+	if err := c.validateTelegram(); err != nil {
+		return err
+	}
+	if err := c.validateMetrics(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c *Config) validateHTTP() error {
+	return validatePort("HTTP_PORT", c.HTTP.Port)
+}
+
+func (c *Config) validateDB() error {
 	if c.DB.Host == "" {
 		return errors.New("DB_HOST must not be empty")
 	}
@@ -273,6 +374,11 @@ func (c *Config) validate() error {
 	if c.DB.SSLMode == "" {
 		return errors.New("DB_SSLMODE must not be empty")
 	}
+
+	return nil
+}
+
+func (c *Config) validateAuth() error {
 	if len(c.Auth.JWTSecret) < 32 {
 		return errors.New("JWT_SECRET must be at least 32 characters")
 	}
@@ -282,6 +388,11 @@ func (c *Config) validate() error {
 	if c.Auth.RefreshTokenTTL <= 0 {
 		return errors.New("REFRESH_TOKEN_TTL must be positive")
 	}
+
+	return nil
+}
+
+func (c *Config) validateScheduler() error {
 	if c.Scheduler.Interval <= 0 {
 		return errors.New("SCHEDULER_INTERVAL must be positive")
 	}
@@ -291,12 +402,22 @@ func (c *Config) validate() error {
 	if c.Scheduler.Workers <= 0 {
 		return errors.New("SCHEDULER_WORKERS must be positive")
 	}
+
+	return nil
+}
+
+func (c *Config) validateRecurrence() error {
 	if c.Recurrence.Interval <= 0 {
 		return errors.New("RECURRENCE_INTERVAL must be positive")
 	}
 	if c.Recurrence.BatchSize <= 0 {
 		return errors.New("RECURRENCE_BATCH_SIZE must be positive")
 	}
+
+	return nil
+}
+
+func (c *Config) validateKafkaPublisher() error {
 	if len(c.Kafka.Brokers) == 0 {
 		return errors.New("KAFKA_BROKERS must not be empty")
 	}
@@ -308,15 +429,33 @@ func (c *Config) validate() error {
 	if c.Kafka.NotificationTopic == "" {
 		return errors.New("KAFKA_NOTIFICATION_TOPIC must not be empty")
 	}
+
+	return nil
+}
+
+func (c *Config) validateKafkaConsumer() error {
+	if err := c.validateKafkaPublisher(); err != nil {
+		return err
+	}
 	if c.Kafka.NotificationGroup == "" {
 		return errors.New("KAFKA_NOTIFICATION_CONSUMER_GROUP must not be empty")
 	}
+
+	return nil
+}
+
+func (c *Config) validateOutbox() error {
 	if c.Outbox.Interval <= 0 {
 		return errors.New("OUTBOX_INTERVAL must be positive")
 	}
 	if c.Outbox.BatchSize <= 0 {
 		return errors.New("OUTBOX_BATCH_SIZE must be positive")
 	}
+
+	return nil
+}
+
+func (c *Config) validateTelegram() error {
 	if len(c.Telegram.RetryDelays) == 0 {
 		return errors.New("TELEGRAM_RETRY_DELAYS must not be empty")
 	}
@@ -331,6 +470,11 @@ func (c *Config) validate() error {
 	if c.Telegram.DeliveryBatchSize <= 0 {
 		return errors.New("TELEGRAM_DELIVERY_BATCH_SIZE must be positive")
 	}
+
+	return nil
+}
+
+func (c *Config) validateMetrics() error {
 	if c.Metrics.Port < 0 {
 		return errors.New("METRICS_PORT must be between 1 and 65535 or 0 to disable")
 	}

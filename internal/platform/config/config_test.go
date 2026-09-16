@@ -35,6 +35,69 @@ func TestValidateRequiresJWTSecret(t *testing.T) {
 	}
 }
 
+func TestLoadSchedulerDoesNotRequireJWTSecret(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
+
+	cfg, err := LoadScheduler()
+	if err != nil {
+		t.Fatalf("LoadScheduler: %v", err)
+	}
+	if cfg.Auth.JWTSecret != "" {
+		t.Fatalf("JWTSecret = %q, want empty value allowed for scheduler", cfg.Auth.JWTSecret)
+	}
+}
+
+func TestLoadNotifierDoesNotRequireJWTSecret(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
+
+	cfg, err := LoadNotifier()
+	if err != nil {
+		t.Fatalf("LoadNotifier: %v", err)
+	}
+	if cfg.Auth.JWTSecret != "" {
+		t.Fatalf("JWTSecret = %q, want empty value allowed for notifier", cfg.Auth.JWTSecret)
+	}
+}
+
+func TestLoadAPIRequiresJWTSecret(t *testing.T) {
+	t.Setenv("JWT_SECRET", "short")
+
+	_, err := LoadAPI()
+	if err == nil || err.Error() != "JWT_SECRET must be at least 32 characters" {
+		t.Fatalf("LoadAPI error = %v, want JWT secret error", err)
+	}
+}
+
+func TestLoadSchedulerRejectsNonPositiveSchedulerInterval(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
+	t.Setenv("SCHEDULER_INTERVAL", "0s")
+
+	_, err := LoadScheduler()
+	if err == nil || err.Error() != "SCHEDULER_INTERVAL must be positive" {
+		t.Fatalf("LoadScheduler error = %v, want scheduler interval error", err)
+	}
+}
+
+func TestLoadSchedulerRejectsNonPositiveRecurrenceBatchSize(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
+	t.Setenv("RECURRENCE_BATCH_SIZE", "0")
+
+	_, err := LoadScheduler()
+	if err == nil || err.Error() != "RECURRENCE_BATCH_SIZE must be positive" {
+		t.Fatalf("LoadScheduler error = %v, want recurrence batch size error", err)
+	}
+}
+
+func TestLoadNotifierRejectsNonPositiveDeliveryBatchSize(t *testing.T) {
+	t.Setenv("JWT_SECRET", "")
+	t.Setenv("TELEGRAM_DELIVERY_BATCH_SIZE", "0")
+
+	_, err := LoadNotifier()
+	if err == nil || err.Error() != "TELEGRAM_DELIVERY_BATCH_SIZE must be positive" {
+		t.Fatalf("LoadNotifier error = %v, want telegram delivery batch size error", err)
+	}
+}
+
 func validTestConfig() *Config {
 	return &Config{
 		HTTP: HTTPConfig{Port: 8080},

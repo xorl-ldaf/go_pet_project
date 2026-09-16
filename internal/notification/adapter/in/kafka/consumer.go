@@ -13,9 +13,15 @@ import (
 )
 
 type Consumer struct {
-	client  *kgo.Client
+	client  kafkaClient
 	service notificationin.NotificationService
 	logger  *slog.Logger
+}
+
+type kafkaClient interface {
+	PollFetches(ctx context.Context) kgo.Fetches
+	CommitRecords(ctx context.Context, rs ...*kgo.Record) error
+	Close()
 }
 
 func NewConsumer(brokers []string, topic string, group string, service notificationin.NotificationService, logger *slog.Logger) (*Consumer, error) {
@@ -75,6 +81,7 @@ func (c *Consumer) Run(ctx context.Context) error {
 					"offset", record.Offset,
 					"error", err,
 				)
+				return err
 			}
 		}
 	}

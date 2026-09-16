@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,6 +66,68 @@ func TestRegisterSuccess(t *testing.T) {
 	}
 }
 
+func TestRegisterRejectsPasswordShorterThanEightBytes(t *testing.T) {
+	users := &fakeUserRepository{}
+	passwords := &fakePasswordHasher{}
+	service := newTestAuthService(t, users, passwords, nil, nil, nil, time.Now().UTC())
+
+	cmd := validRegisterCommand()
+	cmd.Password = "1234567"
+
+	_, err := service.Register(context.Background(), cmd)
+	if !errors.Is(err, application.ErrInvalidPassword) {
+		t.Fatalf("register error = %v, want ErrInvalidPassword", err)
+	}
+	if passwords.hashCalls != 0 {
+		t.Fatalf("hash calls = %d, want 0", passwords.hashCalls)
+	}
+	if len(users.created) != 0 {
+		t.Fatalf("create calls = %d, want 0", len(users.created))
+	}
+}
+
+func TestRegisterRejectsPasswordLongerThanSeventyTwoBytes(t *testing.T) {
+	users := &fakeUserRepository{}
+	passwords := &fakePasswordHasher{}
+	service := newTestAuthService(t, users, passwords, nil, nil, nil, time.Now().UTC())
+
+	cmd := validRegisterCommand()
+	cmd.Password = strings.Repeat("a", 73)
+
+	_, err := service.Register(context.Background(), cmd)
+	if !errors.Is(err, application.ErrInvalidPassword) {
+		t.Fatalf("register error = %v, want ErrInvalidPassword", err)
+	}
+	if passwords.hashCalls != 0 {
+		t.Fatalf("hash calls = %d, want 0", passwords.hashCalls)
+	}
+	if len(users.created) != 0 {
+		t.Fatalf("create calls = %d, want 0", len(users.created))
+	}
+}
+
+func TestRegisterAcceptsValidPasswordLength(t *testing.T) {
+	users := &fakeUserRepository{
+		findByEmailErr:    userdomain.ErrUserNotFound,
+		findByUsernameErr: userdomain.ErrUserNotFound,
+	}
+	passwords := &fakePasswordHasher{hashResult: "hashed-password"}
+	service := newTestAuthService(t, users, passwords, nil, nil, nil, time.Now().UTC())
+
+	cmd := validRegisterCommand()
+	cmd.Password = "12345678"
+
+	if _, err := service.Register(context.Background(), cmd); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if passwords.hashCalls != 1 {
+		t.Fatalf("hash calls = %d, want 1", passwords.hashCalls)
+	}
+	if len(users.created) != 1 {
+		t.Fatalf("create calls = %d, want 1", len(users.created))
+	}
+}
+
 func TestRegisterDuplicateEmail(t *testing.T) {
 	users := &fakeUserRepository{
 		findByEmailUser: existingUser(),
@@ -102,6 +165,42 @@ func TestRegisterDuplicateUsername(t *testing.T) {
 	}
 	if len(users.created) != 0 {
 		t.Fatalf("create calls = %d, want 0", len(users.created))
+	}
+}
+
+func TestRegisterCreateMapsEmailConflict(t *testing.T) {
+	users := &fakeUserRepository{
+		findByEmailErr:    userdomain.ErrUserNotFound,
+		findByUsernameErr: userdomain.ErrUserNotFound,
+		createErr:         userdomain.ErrEmailAlreadyExists,
+	}
+	passwords := &fakePasswordHasher{hashResult: "hashed-password"}
+	service := newTestAuthService(t, users, passwords, nil, nil, nil, time.Now().UTC())
+
+	_, err := service.Register(context.Background(), validRegisterCommand())
+	if !errors.Is(err, application.ErrEmailAlreadyExists) {
+		t.Fatalf("register error = %v, want ErrEmailAlreadyExists", err)
+	}
+	if len(users.created) != 1 {
+		t.Fatalf("create calls = %d, want 1", len(users.created))
+	}
+}
+
+func TestRegisterCreateMapsUsernameConflict(t *testing.T) {
+	users := &fakeUserRepository{
+		findByEmailErr:    userdomain.ErrUserNotFound,
+		findByUsernameErr: userdomain.ErrUserNotFound,
+		createErr:         userdomain.ErrUsernameAlreadyExists,
+	}
+	passwords := &fakePasswordHasher{hashResult: "hashed-password"}
+	service := newTestAuthService(t, users, passwords, nil, nil, nil, time.Now().UTC())
+
+	_, err := service.Register(context.Background(), validRegisterCommand())
+	if !errors.Is(err, application.ErrUsernameAlreadyExists) {
+		t.Fatalf("register error = %v, want ErrUsernameAlreadyExists", err)
+	}
+	if len(users.created) != 1 {
+		t.Fatalf("create calls = %d, want 1", len(users.created))
 	}
 }
 
