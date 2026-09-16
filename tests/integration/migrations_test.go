@@ -109,7 +109,7 @@ func startPostgres(ctx context.Context, t *testing.T) {
 	}
 
 	testInfraOnce.Do(func() {
-		testInfraStartErr, testInfraSkipCause = startLocalTestInfrastructure(ctx)
+		testInfraSkipCause, testInfraStartErr = startLocalTestInfrastructure(ctx)
 	})
 	if testInfraSkipCause != "" {
 		t.Skip(testInfraSkipCause)
@@ -123,16 +123,16 @@ func usesExternalTestInfrastructure() bool {
 	return strings.EqualFold(os.Getenv("TEST_INFRA_EXTERNAL"), "true")
 }
 
-func startLocalTestInfrastructure(ctx context.Context) (error, string) {
+func startLocalTestInfrastructure(ctx context.Context) (string, error) {
 	if _, err := exec.LookPath("docker"); err != nil {
-		return nil, "Docker CLI is required for integration tests"
+		return "Docker CLI is required for integration tests", nil
 	}
 
 	infoCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	if output, err := exec.CommandContext(infoCtx, "docker", "info").CombinedOutput(); err != nil {
-		return nil, fmt.Sprintf("Docker daemon is required for integration tests: %s", strings.TrimSpace(string(output)))
+		return fmt.Sprintf("Docker daemon is required for integration tests: %s", strings.TrimSpace(string(output))), nil
 	}
 
 	composeCtx, composeCancel := context.WithTimeout(ctx, 2*time.Minute)
@@ -141,10 +141,10 @@ func startLocalTestInfrastructure(ctx context.Context) (error, string) {
 	cmd := exec.CommandContext(composeCtx, "docker", "compose", "-f", "../../deploy/compose.yaml", "up", "-d", "postgres", "kafka")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("docker compose up: %w: %s", err, strings.TrimSpace(string(output))), ""
+		return "", fmt.Errorf("docker compose up: %w: %s", err, strings.TrimSpace(string(output)))
 	}
 
-	return nil, ""
+	return "", nil
 }
 
 func waitForPostgres(ctx context.Context, t *testing.T, cfg config.DBConfig) {
