@@ -175,9 +175,20 @@ func TestNotificationKafkaConsumerIdempotency(t *testing.T) {
 	cfg := loadConfig(t)
 	pg, userID, taskID, reminderID := setupNotificationDB(ctx, t, "todo_notification_kafka_test_")
 	waitForKafka(ctx, t, cfg.Kafka)
+	topic := uniqueKafkaTopic(cfg.Kafka.NotificationTopic, "notification-kafka")
 	group := "notification-kafka-test-" + uuid.NewString()
 	service := newIntegrationNotificationService(t, pg, group)
-	consumer, err := notificationkafka.NewConsumer(cfg.Kafka.Brokers, cfg.Kafka.NotificationTopic, group, service, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	publisher, err := outboxkafka.NewPublisher(cfg.Kafka.Brokers, topic)
+	if err != nil {
+		t.Fatalf("NewPublisher: %v", err)
+	}
+	defer publisher.Close()
+	event := mustNotificationOutboxEvent(t, uuid.New(), userID, taskID, reminderID)
+	if err := publisher.Publish(ctx, event); err != nil {
+		t.Fatalf("publish event: %v", err)
+	}
+
+	consumer, err := notificationkafka.NewConsumer(cfg.Kafka.Brokers, topic, group, service, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("NewConsumer: %v", err)
 	}
@@ -188,15 +199,6 @@ func TestNotificationKafkaConsumerIdempotency(t *testing.T) {
 		_ = consumer.Run(consumerCtx)
 	}()
 
-	publisher, err := outboxkafka.NewPublisher(cfg.Kafka.Brokers, cfg.Kafka.NotificationTopic)
-	if err != nil {
-		t.Fatalf("NewPublisher: %v", err)
-	}
-	defer publisher.Close()
-	event := mustNotificationOutboxEvent(t, uuid.New(), userID, taskID, reminderID)
-	if err := publisher.Publish(ctx, event); err != nil {
-		t.Fatalf("publish event: %v", err)
-	}
 	waitForNotificationCount(ctx, t, pg, userID, 1)
 	if err := publisher.Publish(ctx, event); err != nil {
 		t.Fatalf("publish duplicate event: %v", err)
@@ -284,6 +286,7 @@ func TestReminderNotificationE2E(t *testing.T) {
 	pg := setupTaskHTTPDatabase(ctx, t, "todo_notification_e2e_test_")
 	router, _ := buildTaskHTTPRouter(t, pg)
 	waitForKafka(ctx, t, cfg.Kafka)
+	topic := uniqueKafkaTopic(cfg.Kafka.NotificationTopic, "notification-e2e")
 	creatorTokens := registerAndLoginTaskUser(t, router, "notification-e2e-creator@example.com", "notification_e2e_creator", "plain-password")
 	assigneeTokens := registerAndLoginTaskUser(t, router, "notification-e2e-assignee@example.com", "notification_e2e_assignee", "plain-password")
 	creator := currentTaskHTTPUser(t, router, creatorTokens.AccessToken)
@@ -315,15 +318,6 @@ func TestReminderNotificationE2E(t *testing.T) {
 
 	group := "notification-e2e-" + uuid.NewString()
 	notifierService := newIntegrationNotificationService(t, pg, group)
-	consumer, err := notificationkafka.NewConsumer(cfg.Kafka.Brokers, cfg.Kafka.NotificationTopic, group, notifierService, slog.New(slog.NewTextHandler(io.Discard, nil)))
-	if err != nil {
-		t.Fatalf("NewConsumer: %v", err)
-	}
-	consumerCtx, stopConsumer := context.WithCancel(ctx)
-	defer stopConsumer()
-	defer consumer.Close()
-	go func() { _ = consumer.Run(consumerCtx) }()
-
 	taskRepo := taskpostgres.NewRepository(pg.GORM)
 	reminderRepo := reminderpostgres.NewRepository(pg.GORM)
 	outboxRepo := outboxpostgres.NewRepository(pg.GORM)
@@ -338,7 +332,7 @@ func TestReminderNotificationE2E(t *testing.T) {
 	if _, err := runner.ProcessOnce(ctx); err != nil {
 		t.Fatalf("scheduler ProcessOnce: %v", err)
 	}
-	publisher, err := outboxkafka.NewPublisher(cfg.Kafka.Brokers, cfg.Kafka.NotificationTopic)
+	publisher, err := outboxkafka.NewPublisher(cfg.Kafka.Brokers, topic)
 	if err != nil {
 		t.Fatalf("NewPublisher: %v", err)
 	}
@@ -350,6 +344,15 @@ func TestReminderNotificationE2E(t *testing.T) {
 	if _, err := relay.ProcessOnce(ctx); err != nil {
 		t.Fatalf("relay ProcessOnce: %v", err)
 	}
+	consumer, err := notificationkafka.NewConsumer(cfg.Kafka.Brokers, topic, group, notifierService, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	consumerCtx, stopConsumer := context.WithCancel(ctx)
+	defer stopConsumer()
+	defer consumer.Close()
+	go func() { _ = consumer.Run(consumerCtx) }()
+
 	assigneeID := uuid.MustParse(assignee.ID)
 	waitForNotificationCount(ctx, t, pg, assigneeID, 1)
 
@@ -523,4 +526,8 @@ func createReminderForNotificationHTTP(ctx context.Context, t *testing.T, pg *da
 
 func notificationTestTime() time.Time {
 	return time.Date(2026, 9, 15, 12, 0, 0, 0, time.UTC)
+}
+
+func uniqueKafkaTopic(base string, suffix string) string {
+	return base + "-" + suffix + "-" + uuid.NewString()
 }
