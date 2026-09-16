@@ -13,6 +13,7 @@ type DeadlineUpdate struct {
 type UpdateTaskCommand struct {
 	ActorID     uuid.UUID
 	TaskID      uuid.UUID
+	AssigneeID  *uuid.UUID
 	Title       *string
 	Description *string
 	DeadlineAt  *DeadlineUpdate

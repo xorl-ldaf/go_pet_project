@@ -113,7 +113,92 @@ func TestGetMeInternalError(t *testing.T) {
 	}
 }
 
+func TestListAssignableUsersSuccess(t *testing.T) {
+	userID := uuid.MustParse("10000000-0000-4000-8000-000000000001")
+	otherID := uuid.MustParse("10000000-0000-4000-8000-000000000002")
+	now := time.Date(2026, 9, 14, 23, 45, 0, 0, time.UTC)
+	service := &fakeUserService{
+		assignableResult: query.ListAssignableUsersResult{
+			Users: []query.GetMeResult{
+				{
+					ID:        userID,
+					Email:     "me@example.com",
+					Username:  "me",
+					Timezone:  "UTC",
+					CreatedAt: now,
+					UpdatedAt: now,
+				},
+				{
+					ID:        otherID,
+					Email:     "other@example.com",
+					Username:  "other",
+					Timezone:  "UTC",
+					CreatedAt: now,
+					UpdatedAt: now,
+				},
+			},
+		},
+	}
+	validator := &fakeAccessTokenValidator{
+		claims: authout.AccessTokenClaims{UserID: userID},
+	}
+
+	recorder := performUserRequest(t, service, validator, http.MethodGet, "/api/v1/users/assignable", "Bearer access-token")
+
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", recorder.Code, recorder.Body.String())
+	}
+	if service.assignableCalls != 1 || service.lastAssignableQuery.ActorID != userID {
+		t.Fatalf("service calls=%d query=%#v", service.assignableCalls, service.lastAssignableQuery)
+	}
+	body := recorder.Body.String()
+	if strings.Contains(body, "password") || strings.Contains(body, "password_hash") {
+		t.Fatalf("response must not contain password data: %s", body)
+	}
+
+	var response AssignableUsersResponse
+	decodeResponse(t, recorder, &response)
+	if len(response.Items) != 2 ||
+		response.Items[0].ID != userID.String() ||
+		response.Items[1].ID != otherID.String() {
+		t.Fatalf("unexpected assignable response: %#v", response)
+	}
+}
+
+func TestListAssignableUsersWithoutToken(t *testing.T) {
+	service := &fakeUserService{}
+	validator := &fakeAccessTokenValidator{}
+
+	recorder := performUserRequest(t, service, validator, http.MethodGet, "/api/v1/users/assignable", "")
+
+	assertErrorResponse(t, recorder, http.StatusUnauthorized, "unauthorized")
+	if service.assignableCalls != 0 {
+		t.Fatalf("service calls = %d, want 0", service.assignableCalls)
+	}
+}
+
+func TestListAssignableUsersInternalError(t *testing.T) {
+	userID := uuid.MustParse("10000000-0000-4000-8000-000000000001")
+	service := &fakeUserService{assignableErr: errFakeUserService}
+	validator := &fakeAccessTokenValidator{
+		claims: authout.AccessTokenClaims{UserID: userID},
+	}
+
+	recorder := performUserRequest(t, service, validator, http.MethodGet, "/api/v1/users/assignable", "Bearer access-token")
+
+	assertErrorResponse(t, recorder, http.StatusInternalServerError, "internal_server_error")
+	if strings.Contains(recorder.Body.String(), errFakeUserService.Error()) {
+		t.Fatalf("internal error leaked to response")
+	}
+}
+
 func performGetMeRequest(t *testing.T, service *fakeUserService, validator authhttp.AccessTokenValidator, authorization string) *httptest.ResponseRecorder {
+	t.Helper()
+
+	return performUserRequest(t, service, validator, http.MethodGet, "/api/v1/users/me", authorization)
+}
+
+func performUserRequest(t *testing.T, service *fakeUserService, validator authhttp.AccessTokenValidator, method string, path string, authorization string) *httptest.ResponseRecorder {
 	t.Helper()
 
 	authMiddleware, err := authhttp.NewAuthMiddleware(validator)
@@ -124,7 +209,7 @@ func performGetMeRequest(t *testing.T, service *fakeUserService, validator authh
 	mux := http.NewServeMux()
 	RegisterRoutes(mux, NewHandler(service, slog.New(slog.NewTextHandler(io.Discard, nil))), authMiddleware.Authenticate)
 
-	request := httptest.NewRequest(http.MethodGet, "/api/v1/users/me", nil)
+	request := httptest.NewRequest(method, path, nil)
 	if authorization != "" {
 		request.Header.Set("Authorization", authorization)
 	}
@@ -167,10 +252,16 @@ func decodeResponse(t *testing.T, recorder *httptest.ResponseRecorder, dst any) 
 }
 
 type fakeUserService struct {
-	result    query.GetMeResult
-	err       error
-	calls     int
-	lastQuery query.GetMeQuery
+	result query.GetMeResult
+	err    error
+	calls  int
+
+	assignableResult query.ListAssignableUsersResult
+	assignableErr    error
+	assignableCalls  int
+
+	lastQuery           query.GetMeQuery
+	lastAssignableQuery query.ListAssignableUsersQuery
 }
 
 func (s *fakeUserService) GetMe(_ context.Context, q query.GetMeQuery) (query.GetMeResult, error) {
@@ -181,6 +272,16 @@ func (s *fakeUserService) GetMe(_ context.Context, q query.GetMeQuery) (query.Ge
 	}
 
 	return s.result, nil
+}
+
+func (s *fakeUserService) ListAssignableUsers(_ context.Context, q query.ListAssignableUsersQuery) (query.ListAssignableUsersResult, error) {
+	s.assignableCalls++
+	s.lastAssignableQuery = q
+	if s.assignableErr != nil {
+		return query.ListAssignableUsersResult{}, s.assignableErr
+	}
+
+	return s.assignableResult, nil
 }
 
 type fakeAccessTokenValidator struct {

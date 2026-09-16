@@ -15,6 +15,10 @@ type GetMeResponse struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+type AssignableUsersResponse struct {
+	Items []GetMeResponse `json:"items"`
+}
+
 func newGetMeResponse(result query.GetMeResult) GetMeResponse {
 	return GetMeResponse{
 		ID:        result.ID.String(),
@@ -24,4 +28,13 @@ func newGetMeResponse(result query.GetMeResult) GetMeResponse {
 		CreatedAt: result.CreatedAt,
 		UpdatedAt: result.UpdatedAt,
 	}
+}
+
+func newAssignableUsersResponse(result query.ListAssignableUsersResult) AssignableUsersResponse {
+	items := make([]GetMeResponse, 0, len(result.Users))
+	for _, user := range result.Users {
+		items = append(items, newGetMeResponse(user))
+	}
+
+	return AssignableUsersResponse{Items: items}
 }

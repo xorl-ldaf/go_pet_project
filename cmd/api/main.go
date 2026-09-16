@@ -11,7 +11,10 @@ import (
 	"go_pet_project/internal/bootstrap"
 	"go_pet_project/internal/platform/config"
 	"go_pet_project/internal/platform/logging"
+	"go_pet_project/internal/platform/migrations"
 )
+
+const migrationsDir = "migrations"
 
 func main() {
 	logger := logging.New()
@@ -29,6 +32,11 @@ func run(logger *slog.Logger) error {
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("config loading error", "error", err)
+		return err
+	}
+
+	if err := migrations.Up(ctx, cfg.DB, migrationsDir, logger); err != nil {
+		logger.Error("migration error", "error", err)
 		return err
 	}
 

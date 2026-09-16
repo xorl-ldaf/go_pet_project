@@ -295,11 +295,12 @@ func TestIsOverdue(t *testing.T) {
 	}
 }
 
-func TestReassignUpdatesAssigneeAndOpenTaskStatus(t *testing.T) {
+func TestReassignUpdatesOnlyAssigneeAndUpdatedAt(t *testing.T) {
 	now := testTime()
 	task := restoredTask(t, StatusOpen, now, now)
 	newAssigneeID := uuid.MustParse("10000000-0000-4000-8000-000000000003")
 	reassignedAt := now.Add(time.Minute)
+	original := task
 
 	if err := task.Reassign(newAssigneeID, reassignedAt); err != nil {
 		t.Fatalf("Reassign: %v", err)
@@ -308,37 +309,52 @@ func TestReassignUpdatesAssigneeAndOpenTaskStatus(t *testing.T) {
 	if task.AssigneeID != newAssigneeID {
 		t.Fatalf("AssigneeID = %s, want %s", task.AssigneeID, newAssigneeID)
 	}
-	if task.Status != StatusInProgress {
-		t.Fatalf("Status = %s, want IN_PROGRESS", task.Status)
+	if task.CreatorID != original.CreatorID ||
+		task.Title != original.Title ||
+		task.Description != original.Description ||
+		task.Status != original.Status ||
+		task.DeadlineAt != original.DeadlineAt ||
+		task.CompletedAt != original.CompletedAt ||
+		task.ArchivedAt != original.ArchivedAt {
+		t.Fatalf("Reassign changed fields other than assignee/update time: got %#v want baseline %#v", task, original)
 	}
 	if !task.UpdatedAt.Equal(reassignedAt) {
 		t.Fatalf("UpdatedAt = %s, want %s", task.UpdatedAt, reassignedAt)
 	}
 }
 
-func TestReassignKeepsInProgressStatus(t *testing.T) {
+func TestReassignKeepsCurrentAssigneeAsNoOp(t *testing.T) {
 	now := testTime()
 	task := restoredTask(t, StatusInProgress, now, now)
-	newAssigneeID := uuid.MustParse("10000000-0000-4000-8000-000000000003")
+	snapshot := task
 
-	if err := task.Reassign(newAssigneeID, now.Add(time.Minute)); err != nil {
+	if err := task.Reassign(task.AssigneeID, now.Add(time.Minute)); err != nil {
 		t.Fatalf("Reassign: %v", err)
 	}
 
-	if task.Status != StatusInProgress {
-		t.Fatalf("Status = %s, want IN_PROGRESS", task.Status)
+	if !reflect.DeepEqual(task, snapshot) {
+		t.Fatalf("reassign to current assignee should be no-op: got %#v want %#v", task, snapshot)
 	}
 }
 
-func TestReassignRejectsTerminalStatuses(t *testing.T) {
+func TestReassignKeepsTerminalStatusState(t *testing.T) {
 	for _, status := range []Status{StatusDone, StatusCancelled} {
 		t.Run(string(status), func(t *testing.T) {
 			now := testTime()
 			task := restoredTask(t, status, now, now)
+			snapshot := task
+			newAssigneeID := uuid.MustParse("10000000-0000-4000-8000-000000000003")
+			reassignedAt := now.Add(time.Minute)
 
-			err := task.Reassign(uuid.New(), now.Add(time.Minute))
-			if !errors.Is(err, ErrInvalidStatusTransition) {
-				t.Fatalf("Reassign error = %v, want ErrInvalidStatusTransition", err)
+			if err := task.Reassign(newAssigneeID, reassignedAt); err != nil {
+				t.Fatalf("Reassign: %v", err)
+			}
+			if task.AssigneeID != newAssigneeID ||
+				task.Status != snapshot.Status ||
+				task.CompletedAt != snapshot.CompletedAt ||
+				task.ArchivedAt != snapshot.ArchivedAt ||
+				!task.UpdatedAt.Equal(reassignedAt) {
+				t.Fatalf("terminal reassign state mismatch: got %#v baseline %#v", task, snapshot)
 			}
 		})
 	}

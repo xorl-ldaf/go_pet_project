@@ -19,6 +19,8 @@ import (
 	authpostgres "go_pet_project/internal/auth/adapter/out/postgres"
 	authrefresh "go_pet_project/internal/auth/adapter/out/refresh"
 	authservice "go_pet_project/internal/auth/application/service"
+	permissionpostgres "go_pet_project/internal/permission/adapter/out/postgres"
+	permissionservice "go_pet_project/internal/permission/application/service"
 	"go_pet_project/internal/platform/database"
 	"go_pet_project/internal/platform/migrations"
 	userhttp "go_pet_project/internal/user/adapter/in/http"
@@ -191,7 +193,12 @@ func buildAuthRouter(t *testing.T, pg *database.Postgres) http.Handler {
 	if err != nil {
 		t.Fatalf("new auth middleware: %v", err)
 	}
-	userService, err := userservice.NewUserService(userpostgres.NewRepository(pg.GORM))
+	permissionRepository := permissionpostgres.NewRepository(pg.GORM)
+	assignableUsers, err := permissionservice.NewPermissionService(permissionRepository)
+	if err != nil {
+		t.Fatalf("new permission service: %v", err)
+	}
+	userService, err := userservice.NewUserService(userpostgres.NewRepository(pg.GORM), assignableUsers)
 	if err != nil {
 		t.Fatalf("new user service: %v", err)
 	}

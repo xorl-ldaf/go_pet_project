@@ -7,6 +7,7 @@ import (
 
 	authhttp "go_pet_project/internal/auth/adapter/in/http"
 	"go_pet_project/internal/platform/httpx"
+	"go_pet_project/internal/user/application"
 	userin "go_pet_project/internal/user/application/port/in"
 	"go_pet_project/internal/user/application/query"
 	"go_pet_project/internal/user/domain"
@@ -40,8 +41,26 @@ func (h *Handler) GetMe(w http.ResponseWriter, r *http.Request) {
 	httpx.WriteJSON(w, http.StatusOK, newGetMeResponse(result))
 }
 
+func (h *Handler) ListAssignableUsers(w http.ResponseWriter, r *http.Request) {
+	userID, ok := authhttp.UserIDFromContext(r.Context())
+	if !ok {
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
+		return
+	}
+
+	result, err := h.users.ListAssignableUsers(r.Context(), query.ListAssignableUsersQuery{ActorID: userID})
+	if err != nil {
+		h.writeMappedError(w, err)
+		return
+	}
+
+	httpx.WriteJSON(w, http.StatusOK, newAssignableUsersResponse(result))
+}
+
 func (h *Handler) writeMappedError(w http.ResponseWriter, err error) {
 	switch {
+	case errors.Is(err, application.ErrInvalidActor):
+		httpx.WriteError(w, http.StatusUnauthorized, "unauthorized", "unauthorized")
 	case errors.Is(err, domain.ErrUserNotFound):
 		httpx.WriteError(w, http.StatusNotFound, "user_not_found", "user not found")
 	default:

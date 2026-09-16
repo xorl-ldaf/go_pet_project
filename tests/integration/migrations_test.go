@@ -56,13 +56,16 @@ func TestUserAndRefreshTokenMigrations(t *testing.T) {
 	assertUsersSchema(ctx, t, db)
 	assertRefreshTokensSchema(ctx, t, db)
 	assertTasksSchema(ctx, t, db)
+	assertAssignmentPermissionsSchema(ctx, t, db)
 	assertUserConstraints(ctx, t, db)
 	assertRefreshTokenConstraints(ctx, t, db)
 	assertTaskConstraints(ctx, t, db)
+	assertAssignmentPermissionConstraints(ctx, t, db)
 
 	if err := migrations.Down(ctx, testCfg, migrationsDir, logger); err != nil {
 		t.Fatalf("migration down: %v", err)
 	}
+	assertTableMissing(ctx, t, db, "assignment_permissions")
 	assertTableMissing(ctx, t, db, "tasks")
 	assertTableMissing(ctx, t, db, "refresh_tokens")
 	assertTableMissing(ctx, t, db, "users")
@@ -73,10 +76,15 @@ func TestUserAndRefreshTokenMigrations(t *testing.T) {
 	assertTableExists(ctx, t, db, "users")
 	assertTableExists(ctx, t, db, "refresh_tokens")
 	assertTableExists(ctx, t, db, "tasks")
+	assertTableExists(ctx, t, db, "assignment_permissions")
 }
 
 func loadConfig(t *testing.T) *config.Config {
 	t.Helper()
+
+	if os.Getenv("JWT_SECRET") == "" {
+		t.Setenv("JWT_SECRET", "test-jwt-secret-with-at-least-32-bytes")
+	}
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -100,10 +108,10 @@ func startPostgres(ctx context.Context, t *testing.T) {
 		t.Skipf("Docker daemon is required for integration tests: %s", strings.TrimSpace(string(output)))
 	}
 
-	composeCtx, composeCancel := context.WithTimeout(ctx, 30*time.Second)
+	composeCtx, composeCancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer composeCancel()
 
-	cmd := exec.CommandContext(composeCtx, "docker", "compose", "-f", "../../deploy/compose.yaml", "up", "-d")
+	cmd := exec.CommandContext(composeCtx, "docker", "compose", "-f", "../../deploy/compose.yaml", "up", "-d", "postgres", "kafka")
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("docker compose up: %v: %s", err, strings.TrimSpace(string(output)))
@@ -239,6 +247,18 @@ func assertTasksSchema(ctx context.Context, t *testing.T, db *sql.DB) {
 	assertIndexColumns(ctx, t, db, "tasks_deadline_at_idx", "deadline_at")
 }
 
+func assertAssignmentPermissionsSchema(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	assertTableExists(ctx, t, db, "assignment_permissions")
+	assertColumn(ctx, t, db, "assignment_permissions", "assigner_id", "uuid", "NO")
+	assertColumn(ctx, t, db, "assignment_permissions", "assignee_id", "uuid", "NO")
+	assertColumn(ctx, t, db, "assignment_permissions", "created_at", "timestamp with time zone", "NO")
+	assertCompositePrimaryKey(ctx, t, db, "assignment_permissions", "assignment_permissions_pkey", "assigner_id", "assignee_id")
+	assertForeignKey(ctx, t, db, "assignment_permissions", "assignment_permissions_assigner_id_fkey", "users", "NO ACTION")
+	assertForeignKey(ctx, t, db, "assignment_permissions", "assignment_permissions_assignee_id_fkey", "users", "NO ACTION")
+}
+
 func assertTableExists(ctx context.Context, t *testing.T, db *sql.DB, table string) {
 	t.Helper()
 
@@ -300,17 +320,22 @@ func assertPrimaryKey(ctx context.Context, t *testing.T, db *sql.DB, table strin
 	assertConstraintColumns(ctx, t, db, table, constraint, "PRIMARY KEY", column)
 }
 
+func assertCompositePrimaryKey(ctx context.Context, t *testing.T, db *sql.DB, table string, constraint string, columns ...string) {
+	t.Helper()
+
+	assertConstraintColumns(ctx, t, db, table, constraint, "PRIMARY KEY", columns...)
+}
+
 func assertUniqueConstraint(ctx context.Context, t *testing.T, db *sql.DB, table string, constraint string, column string) {
 	t.Helper()
 
 	assertConstraintColumns(ctx, t, db, table, constraint, "UNIQUE", column)
 }
 
-func assertConstraintColumns(ctx context.Context, t *testing.T, db *sql.DB, table string, constraint string, constraintType string, column string) {
+func assertConstraintColumns(ctx context.Context, t *testing.T, db *sql.DB, table string, constraint string, constraintType string, columns ...string) {
 	t.Helper()
 
-	var actualColumn string
-	err := db.QueryRowContext(ctx, `
+	rows, err := db.QueryContext(ctx, `
 		SELECT kcu.column_name
 		FROM information_schema.table_constraints tc
 		JOIN information_schema.key_column_usage kcu
@@ -321,12 +346,26 @@ func assertConstraintColumns(ctx context.Context, t *testing.T, db *sql.DB, tabl
 			AND tc.table_name = $1
 			AND tc.constraint_name = $2
 			AND tc.constraint_type = $3
-	`, table, constraint, constraintType).Scan(&actualColumn)
+		ORDER BY kcu.ordinal_position
+	`, table, constraint, constraintType)
 	if err != nil {
 		t.Fatalf("constraint %s on %s: %v", constraint, table, err)
 	}
-	if actualColumn != column {
-		t.Fatalf("constraint %s column = %s, want %s", constraint, actualColumn, column)
+	defer rows.Close()
+
+	var actual []string
+	for rows.Next() {
+		var column string
+		if err := rows.Scan(&column); err != nil {
+			t.Fatalf("scan constraint %s column: %v", constraint, err)
+		}
+		actual = append(actual, column)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate constraint %s columns: %v", constraint, err)
+	}
+	if strings.Join(actual, ",") != strings.Join(columns, ",") {
+		t.Fatalf("constraint %s columns = %v, want %v", constraint, actual, columns)
 	}
 }
 
@@ -627,6 +666,52 @@ func assertTaskConstraints(ctx context.Context, t *testing.T, db *sql.DB) {
 	}
 }
 
+func assertAssignmentPermissionConstraints(ctx context.Context, t *testing.T, db *sql.DB) {
+	t.Helper()
+
+	assignerID := "60000000-0000-4000-8000-000000000001"
+	assigneeID := "60000000-0000-4000-8000-000000000002"
+	thirdID := "60000000-0000-4000-8000-000000000003"
+	insertUser(ctx, t, db, assignerID, "permission-assigner@example.com", "permission_assigner", true, true)
+	insertUser(ctx, t, db, assigneeID, "permission-assignee@example.com", "permission_assignee", true, true)
+	insertUser(ctx, t, db, thirdID, "permission-third@example.com", "permission_third", true, true)
+
+	insertAssignmentPermission(ctx, t, db, assignerID, assigneeID)
+	insertAssignmentPermission(ctx, t, db, assigneeID, assignerID)
+	insertAssignmentPermission(ctx, t, db, thirdID, thirdID)
+
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO assignment_permissions (assigner_id, assignee_id)
+		VALUES ($1, $2)
+	`, assignerID, assigneeID)
+	expectExecError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO assignment_permissions (assigner_id, assignee_id)
+		VALUES ('99999999-9999-4999-8999-999999999999', $1)
+	`, thirdID)
+	expectExecError(t, err)
+
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO assignment_permissions (assigner_id, assignee_id)
+		VALUES ($1, '99999999-9999-4999-8999-999999999999')
+	`, thirdID)
+	expectExecError(t, err)
+
+	var directedCount int
+	if err := db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM assignment_permissions
+		WHERE (assigner_id = $1 AND assignee_id = $2)
+			OR (assigner_id = $2 AND assignee_id = $1)
+	`, assignerID, assigneeID).Scan(&directedCount); err != nil {
+		t.Fatalf("count directed assignment permissions: %v", err)
+	}
+	if directedCount != 2 {
+		t.Fatalf("directed permission count = %d, want 2", directedCount)
+	}
+}
+
 func insertUser(ctx context.Context, t *testing.T, db *sql.DB, id string, email string, username string, withPassword bool, withTimezone bool) {
 	t.Helper()
 
@@ -649,6 +734,17 @@ func insertUser(ctx context.Context, t *testing.T, db *sql.DB, id string, email 
 	query := fmt.Sprintf("INSERT INTO users (%s) VALUES (%s)", strings.Join(columns, ", "), strings.Join(placeholders, ", "))
 	if _, err := db.ExecContext(ctx, query, args...); err != nil {
 		t.Fatalf("insert user %s: %v", id, err)
+	}
+}
+
+func insertAssignmentPermission(ctx context.Context, t *testing.T, db *sql.DB, assignerID string, assigneeID string) {
+	t.Helper()
+
+	if _, err := db.ExecContext(ctx, `
+		INSERT INTO assignment_permissions (assigner_id, assignee_id)
+		VALUES ($1, $2)
+	`, assignerID, assigneeID); err != nil {
+		t.Fatalf("insert assignment permission %s -> %s: %v", assignerID, assigneeID, err)
 	}
 }
 

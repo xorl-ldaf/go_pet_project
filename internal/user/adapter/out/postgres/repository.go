@@ -41,6 +41,27 @@ func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (domain.User, e
 	return toDomain(model), nil
 }
 
+func (r *Repository) FindByIDs(ctx context.Context, ids []uuid.UUID) ([]domain.User, error) {
+	if len(ids) == 0 {
+		return []domain.User{}, nil
+	}
+
+	var models []userModel
+	if err := r.db.WithContext(ctx).
+		Where("id IN ?", ids).
+		Order("username ASC").
+		Find(&models).Error; err != nil {
+		return nil, fmt.Errorf("find users by ids: %w", err)
+	}
+
+	users := make([]domain.User, 0, len(models))
+	for _, model := range models {
+		users = append(users, toDomain(model))
+	}
+
+	return users, nil
+}
+
 func (r *Repository) FindByEmail(ctx context.Context, email string) (domain.User, error) {
 	var model userModel
 	if err := r.db.WithContext(ctx).First(&model, "email = ?", email).Error; err != nil {

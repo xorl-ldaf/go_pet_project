@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -16,6 +17,8 @@ import (
 	"go_pet_project/internal/platform/database"
 	"go_pet_project/internal/platform/logging"
 	"go_pet_project/internal/platform/migrations"
+
+	"github.com/twmb/franz-go/pkg/kgo"
 )
 
 const (
@@ -47,7 +50,7 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
-	if err := composeUp(ctx, logger); err != nil {
+	if err := composeUp(ctx, logger, "postgres", "kafka"); err != nil {
 		return err
 	}
 
@@ -55,16 +58,20 @@ func run(logger *slog.Logger) error {
 		return err
 	}
 
+	if err := waitForKafka(ctx, cfg.Kafka.Brokers, 90*time.Second, time.Second, logger); err != nil {
+		return err
+	}
+
 	if err := migrations.Up(ctx, cfg.DB, migrationsDir, logger); err != nil {
 		return err
 	}
 
-	return runAPI(ctx, logger)
+	return runDevProcesses(ctx, logger)
 }
 
 func checkDocker(ctx context.Context) error {
 	if _, err := exec.LookPath("docker"); err != nil {
-		return errors.New("Docker CLI not found")
+		return errors.New("docker CLI not found")
 	}
 
 	checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -77,7 +84,7 @@ func checkDocker(ctx context.Context) error {
 		if details == "" {
 			details = err.Error()
 		}
-		return fmt.Errorf("Docker daemon is not running or is not accessible: %s", details)
+		return fmt.Errorf("docker daemon is not running or is not accessible: %s", details)
 	}
 
 	composeCtx, composeCancel := context.WithTimeout(ctx, 10*time.Second)
@@ -90,16 +97,18 @@ func checkDocker(ctx context.Context) error {
 		if details == "" {
 			details = err.Error()
 		}
-		return fmt.Errorf("Docker Compose plugin is not available: %s", details)
+		return fmt.Errorf("docker Compose plugin is not available: %s", details)
 	}
 
 	return nil
 }
 
-func composeUp(ctx context.Context, logger *slog.Logger) error {
+func composeUp(ctx context.Context, logger *slog.Logger, services ...string) error {
 	logger.Info("starting Docker infrastructure", "compose_file", composeFile)
 
-	cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composeFile, "up", "-d")
+	args := []string{"compose", "-f", composeFile, "up", "-d"}
+	args = append(args, services...)
+	cmd := exec.CommandContext(ctx, "docker", args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -139,58 +148,154 @@ func waitForPostgres(ctx context.Context, cfg config.DBConfig, timeout time.Dura
 	}
 }
 
-func runAPI(ctx context.Context, logger *slog.Logger) error {
-	logger.Info("starting API process")
+func waitForKafka(ctx context.Context, brokers []string, timeout time.Duration, interval time.Duration, logger *slog.Logger) error {
+	logger.Info("waiting for Kafka readiness", "timeout", timeout.String(), "interval", interval.String(), "brokers", brokers)
 
-	cmd := exec.Command("go", "run", "./cmd/api")
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start API process: %w", err)
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		client, err := kgo.NewClient(kgo.SeedBrokers(brokers...))
+		if err == nil {
+			pingCtx, pingCancel := context.WithTimeout(waitCtx, 5*time.Second)
+			err = client.Ping(pingCtx)
+			pingCancel()
+			client.Close()
+			if err == nil {
+				logger.Info("Kafka is ready")
+				return nil
+			}
+		}
+
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("kafka did not become ready before timeout: %w", waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+type devProcess struct {
+	name string
+	cmd  *exec.Cmd
+	done chan struct{}
+	mu   sync.Mutex
+	err  error
+}
+
+func runDevProcesses(ctx context.Context, logger *slog.Logger) error {
+	processes := []*devProcess{
+		{name: "API", cmd: newGoRunCommand("./cmd/api")},
+		{name: "Scheduler", cmd: newGoRunCommand("./cmd/scheduler", "METRICS_PORT=9091")},
+		{name: "Notifier", cmd: newGoRunCommand("./cmd/notifier", "METRICS_PORT=9093")},
 	}
 
-	waitCh := make(chan error, 1)
-	go func() {
-		waitCh <- cmd.Wait()
-	}()
+	for _, process := range processes {
+		logger.Info("starting dev process", "process", process.name)
+		if err := process.cmd.Start(); err != nil {
+			stopDevProcesses(processes, logger)
+			return fmt.Errorf("start %s process: %w", process.name, err)
+		}
+		process.done = make(chan struct{})
+		go func(process *devProcess) {
+			err := process.cmd.Wait()
+			process.mu.Lock()
+			process.err = err
+			process.mu.Unlock()
+			close(process.done)
+		}(process)
+	}
+
+	type processExit struct {
+		process *devProcess
+		err     error
+	}
+	exits := make(chan processExit, len(processes))
+	for _, process := range processes {
+		go func(process *devProcess) {
+			<-process.done
+			exits <- processExit{process: process, err: process.waitErr()}
+		}(process)
+	}
 
 	select {
 	case <-ctx.Done():
-		logger.Info("stopping API process")
-		return stopProcessGroup(cmd, waitCh, logger)
-	case err := <-waitCh:
-		if err != nil {
-			return fmt.Errorf("API process exited: %w", err)
+		logger.Info("stopping dev processes")
+		return stopDevProcesses(processes, logger)
+	case exit := <-exits:
+		if exit.err != nil {
+			stopDevProcesses(processes, logger)
+			return fmt.Errorf("%s process exited: %w", exit.process.name, exit.err)
 		}
+		stopDevProcesses(processes, logger)
 		return nil
 	}
 }
 
-func stopProcessGroup(cmd *exec.Cmd, waitCh <-chan error, logger *slog.Logger) error {
-	if cmd.Process == nil {
-		return nil
+func newGoRunCommand(pkg string, extraEnv ...string) *exec.Cmd {
+	cmd := exec.Command("go", "run", pkg)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+
+	return cmd
+}
+
+func stopDevProcesses(processes []*devProcess, logger *slog.Logger) error {
+	var stopErr error
+	for _, process := range processes {
+		if process.cmd == nil || process.done == nil {
+			continue
+		}
+		if err := stopProcessGroup(process, logger); err != nil && stopErr == nil {
+			stopErr = err
+		}
 	}
 
-	if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return fmt.Errorf("send SIGTERM to API process group: %w", err)
+	return stopErr
+}
+
+func (p *devProcess) waitErr() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.err
+}
+
+func stopProcessGroup(process *devProcess, logger *slog.Logger) error {
+	if process.cmd.Process == nil {
+		return nil
 	}
 
 	select {
-	case err := <-waitCh:
+	case <-process.done:
+		return nil
+	default:
+	}
+
+	if err := syscall.Kill(-process.cmd.Process.Pid, syscall.SIGINT); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("send SIGINT to %s process group: %w", process.name, err)
+	}
+
+	select {
+	case <-process.done:
+		err := process.waitErr()
 		if err != nil {
-			logger.Info("API process stopped", "error", err)
+			logger.Info("dev process stopped", "process", process.name, "error", err)
 		} else {
-			logger.Info("API process stopped")
+			logger.Info("dev process stopped", "process", process.name)
 		}
 		return nil
 	case <-time.After(15 * time.Second):
-		logger.Warn("API process did not stop gracefully, sending SIGKILL")
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-			return fmt.Errorf("send SIGKILL to API process group: %w", err)
+		logger.Warn("dev process did not stop gracefully, sending SIGKILL", "process", process.name)
+		if err := syscall.Kill(-process.cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+			return fmt.Errorf("send SIGKILL to %s process group: %w", process.name, err)
 		}
-		<-waitCh
+		<-process.done
 		return nil
 	}
 }

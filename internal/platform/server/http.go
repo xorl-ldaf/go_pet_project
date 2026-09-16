@@ -5,7 +5,10 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sync/atomic"
 	"time"
+
+	"go_pet_project/internal/platform/metrics"
 )
 
 type Server struct {
@@ -48,11 +51,37 @@ func NewRouter(readiness func(context.Context) error, registerRoutes ...func(*ht
 		_, _ = w.Write([]byte("ok\n"))
 	})
 
+	mux.Handle("GET /metrics", metrics.Handler())
+
 	for _, register := range registerRoutes {
 		register(mux)
 	}
 
-	return mux
+	return metrics.HTTPMiddleware(mux)
+}
+
+type ReadinessGate struct {
+	shuttingDown atomic.Bool
+	check        func(context.Context) error
+}
+
+func NewReadinessGate(check func(context.Context) error) *ReadinessGate {
+	return &ReadinessGate{check: check}
+}
+
+func (g *ReadinessGate) Check(ctx context.Context) error {
+	if g.shuttingDown.Load() {
+		return errors.New("service is shutting down")
+	}
+	if g.check == nil {
+		return nil
+	}
+
+	return g.check(ctx)
+}
+
+func (g *ReadinessGate) MarkShuttingDown() {
+	g.shuttingDown.Store(true)
 }
 
 func (s *Server) Start() error {

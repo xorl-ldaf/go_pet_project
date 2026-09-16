@@ -90,6 +90,35 @@ func TestPostgresUserRepository(t *testing.T) {
 		}
 	})
 
+	t.Run("find by ids", func(t *testing.T) {
+		empty, err := repo.FindByIDs(ctx, nil)
+		if err != nil {
+			t.Fatalf("find by empty ids: %v", err)
+		}
+		if len(empty) != 0 {
+			t.Fatalf("empty FindByIDs result length = %d, want 0", len(empty))
+		}
+
+		first := newTestUser("find-by-ids-a@example.com", "find_by_ids_a")
+		second := newTestUser("find-by-ids-b@example.com", "find_by_ids_b")
+		if _, err := repo.Create(ctx, first); err != nil {
+			t.Fatalf("create first user: %v", err)
+		}
+		if _, err := repo.Create(ctx, second); err != nil {
+			t.Fatalf("create second user: %v", err)
+		}
+
+		found, err := repo.FindByIDs(ctx, []uuid.UUID{second.ID, first.ID, uuid.New()})
+		if err != nil {
+			t.Fatalf("find by ids: %v", err)
+		}
+		if len(found) != 2 {
+			t.Fatalf("FindByIDs result length = %d, want 2", len(found))
+		}
+		assertUsersEqual(t, found[0], first)
+		assertUsersEqual(t, found[1], second)
+	})
+
 	t.Run("duplicate email returns error", func(t *testing.T) {
 		first := newTestUser("duplicate-email@example.com", "duplicate_email_a")
 		second := newTestUser("duplicate-email@example.com", "duplicate_email_b")

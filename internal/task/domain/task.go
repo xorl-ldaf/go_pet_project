@@ -44,6 +44,23 @@ func NewTask(creatorID uuid.UUID, assigneeID uuid.UUID, title string, descriptio
 	)
 }
 
+func NewTaskOccurrence(seriesID uuid.UUID, creatorID uuid.UUID, assigneeID uuid.UUID, title string, description string, deadlineAt time.Time, now time.Time) (Task, error) {
+	return RestoreTask(
+		uuid.New(),
+		&seriesID,
+		creatorID,
+		assigneeID,
+		title,
+		description,
+		InitialStatus,
+		&deadlineAt,
+		now,
+		now,
+		nil,
+		nil,
+	)
+}
+
 func RestoreTask(
 	id uuid.UUID,
 	seriesID *uuid.UUID,
@@ -165,17 +182,14 @@ func (t *Task) Reassign(assigneeID uuid.UUID, now time.Time) error {
 	if assigneeID == uuid.Nil {
 		return ErrInvalidAssigneeID
 	}
-	if t.Status == StatusDone || t.Status == StatusCancelled {
-		return StatusTransitionError{From: t.Status, To: t.Status}
+	if assigneeID == t.AssigneeID {
+		return nil
 	}
 	if err := t.validateMutationTime(now); err != nil {
 		return err
 	}
 
 	t.AssigneeID = assigneeID
-	if t.Status == StatusOpen {
-		t.Status = StatusInProgress
-	}
 	t.UpdatedAt = now
 
 	return nil

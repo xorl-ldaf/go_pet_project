@@ -2,6 +2,7 @@ package integration
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"io"
 	"log/slog"
@@ -60,7 +61,7 @@ func TestPostgresTaskRepository(t *testing.T) {
 
 	t.Run("create and find by id round trip", func(t *testing.T) {
 		task := newRepositoryTask(t, creator.ID, assignee.ID, "round trip", testTaskTime(1))
-		seriesID := uuid.New()
+		seriesID := createTaskSeriesFixture(ctx, t, pg.SQL, creator.ID, assignee.ID)
 		task.SeriesID = &seriesID
 		deadline := task.CreatedAt.Add(24 * time.Hour)
 		task.DeadlineAt = &deadline
@@ -201,7 +202,10 @@ func TestPostgresTaskRepository(t *testing.T) {
 		base := testTaskTime(20)
 		activeA := createRepositoryTask(ctx, t, tasks, creator.ID, assignee.ID, "list active alpha", base)
 		activeB := createRepositoryTask(ctx, t, tasks, otherCreator.ID, otherAssignee.ID, "list active beta", base.Add(time.Minute))
-		archived := createRepositoryTask(ctx, t, tasks, creator.ID, assignee.ID, "list archived", base.Add(2*time.Minute))
+		createdByCreator := createRepositoryTask(ctx, t, tasks, creator.ID, otherAssignee.ID, "list visible created", base.Add(2*time.Minute))
+		assignedToCreator := createRepositoryTask(ctx, t, tasks, otherCreator.ID, creator.ID, "list visible assigned", base.Add(3*time.Minute))
+		selfAssignedCreator := createRepositoryTask(ctx, t, tasks, creator.ID, creator.ID, "list visible self", base.Add(4*time.Minute))
+		archived := createRepositoryTask(ctx, t, tasks, creator.ID, assignee.ID, "list archived", base.Add(5*time.Minute))
 		if err := archived.Archive(archived.UpdatedAt.Add(time.Minute)); err != nil {
 			t.Fatalf("archive domain: %v", err)
 		}
@@ -237,6 +241,17 @@ func TestPostgresTaskRepository(t *testing.T) {
 		}
 		assertContainsTask(t, byCreator, activeB.ID)
 		assertNotContainsTask(t, byCreator, activeA.ID)
+
+		visibleToCreator, err := tasks.List(ctx, taskout.TaskFilter{VisibleTo: &creator.ID})
+		if err != nil {
+			t.Fatalf("list visible to creator: %v", err)
+		}
+		assertContainsTask(t, visibleToCreator, activeA.ID)
+		assertContainsTask(t, visibleToCreator, createdByCreator.ID)
+		assertContainsTask(t, visibleToCreator, assignedToCreator.ID)
+		assertContainsTaskOnce(t, visibleToCreator, selfAssignedCreator.ID)
+		assertNotContainsTask(t, visibleToCreator, activeB.ID)
+		assertNotContainsTask(t, visibleToCreator, archived.ID)
 
 		status := taskdomain.StatusOpen
 		byStatus, err := tasks.List(ctx, taskout.TaskFilter{Status: &status})
@@ -322,6 +337,34 @@ func TestPostgresTaskRepository(t *testing.T) {
 			t.Fatalf("find with canceled context error = %v, want context.Canceled", err)
 		}
 	})
+}
+
+func createTaskSeriesFixture(ctx context.Context, t *testing.T, db *sql.DB, creatorID uuid.UUID, assigneeID uuid.UUID) uuid.UUID {
+	t.Helper()
+
+	seriesID := uuid.New()
+	_, err := db.ExecContext(ctx, `
+		INSERT INTO task_series (
+			id,
+			creator_id,
+			assignee_id,
+			title,
+			description,
+			frequency,
+			"interval",
+			next_deadline_at,
+			timezone,
+			is_active,
+			created_at,
+			updated_at
+		)
+		VALUES ($1, $2, $3, 'task repository fixture', '', 'DAILY', 1, $4, 'UTC', true, $4, $4)
+	`, seriesID, creatorID, assigneeID, testTaskTime(1))
+	if err != nil {
+		t.Fatalf("create task series fixture: %v", err)
+	}
+
+	return seriesID
 }
 
 func createTaskUser(ctx context.Context, t *testing.T, repo *userpostgres.Repository, email string, username string) userdomain.User {
@@ -420,6 +463,20 @@ func assertContainsTask(t *testing.T, tasks []taskdomain.Task, id uuid.UUID) {
 	}
 
 	t.Fatalf("expected task %s in result %s", id, taskIDs(tasks))
+}
+
+func assertContainsTaskOnce(t *testing.T, tasks []taskdomain.Task, id uuid.UUID) {
+	t.Helper()
+
+	count := 0
+	for _, task := range tasks {
+		if task.ID == id {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("expected task %s once in result %s, got %d", id, taskIDs(tasks), count)
+	}
 }
 
 func assertNotContainsTask(t *testing.T, tasks []taskdomain.Task, id uuid.UUID) {

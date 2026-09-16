@@ -19,18 +19,38 @@ import (
 var _ taskin.TaskService = (*TaskService)(nil)
 
 type TaskService struct {
-	tasks taskout.TaskRepository
-	now   func() time.Time
+	tasks        taskout.TaskRepository
+	assignments  taskout.AssignmentAuthorizer
+	reminders    taskout.ReminderManager
+	transactions taskout.TransactionRunner
+	now          func() time.Time
 }
 
-func NewTaskService(tasks taskout.TaskRepository) (*TaskService, error) {
+func NewTaskService(
+	tasks taskout.TaskRepository,
+	assignments taskout.AssignmentAuthorizer,
+	reminders taskout.ReminderManager,
+	transactions taskout.TransactionRunner,
+) (*TaskService, error) {
 	if tasks == nil {
 		return nil, errors.New("task repository is required")
 	}
+	if assignments == nil {
+		return nil, errors.New("assignment authorizer is required")
+	}
+	if reminders == nil {
+		return nil, errors.New("reminder manager is required")
+	}
+	if transactions == nil {
+		return nil, errors.New("transaction runner is required")
+	}
 
 	return &TaskService{
-		tasks: tasks,
-		now:   time.Now,
+		tasks:        tasks,
+		assignments:  assignments,
+		reminders:    reminders,
+		transactions: transactions,
+		now:          time.Now,
 	}, nil
 }
 
@@ -43,8 +63,12 @@ func (s *TaskService) CreateTask(ctx context.Context, cmd command.CreateTaskComm
 	if assigneeID == uuid.Nil {
 		assigneeID = cmd.ActorID
 	}
-	if assigneeID != cmd.ActorID {
-		return domain.Task{}, application.ErrAssignmentNotSupportedYet
+	allowed, err := s.assignments.CanAssign(ctx, cmd.ActorID, assigneeID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("authorize task assignment: %w", err)
+	}
+	if !allowed {
+		return domain.Task{}, application.ErrAssignmentDenied
 	}
 
 	task, err := domain.NewTask(cmd.ActorID, assigneeID, cmd.Title, cmd.Description, cmd.DeadlineAt, s.now().UTC())
@@ -112,6 +136,20 @@ func (s *TaskService) ListTasks(ctx context.Context, q taskquery.ListTasksQuery)
 }
 
 func (s *TaskService) UpdateTask(ctx context.Context, cmd command.UpdateTaskCommand) (domain.Task, error) {
+	var updated domain.Task
+	err := s.transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
+		var err error
+		updated, err = s.updateTask(txCtx, cmd)
+		return err
+	})
+	if err != nil {
+		return domain.Task{}, err
+	}
+
+	return updated, nil
+}
+
+func (s *TaskService) updateTask(ctx context.Context, cmd command.UpdateTaskCommand) (domain.Task, error) {
 	if err := requireActor(cmd.ActorID); err != nil {
 		return domain.Task{}, err
 	}
@@ -126,6 +164,13 @@ func (s *TaskService) UpdateTask(ctx context.Context, cmd command.UpdateTaskComm
 
 	now := s.now().UTC()
 	changed := false
+	deadlineChanged := false
+	if cmd.AssigneeID != nil && *cmd.AssigneeID != task.AssigneeID {
+		if err := s.reassignLoadedTask(ctx, cmd.ActorID, &task, *cmd.AssigneeID, now); err != nil {
+			return domain.Task{}, err
+		}
+		changed = true
+	}
 	if cmd.Title != nil {
 		if err := task.UpdateTitle(*cmd.Title, now); err != nil {
 			return domain.Task{}, err
@@ -139,13 +184,22 @@ func (s *TaskService) UpdateTask(ctx context.Context, cmd command.UpdateTaskComm
 		changed = true
 	}
 	if cmd.DeadlineAt != nil {
-		if err := task.UpdateDeadline(cmd.DeadlineAt.Value, now); err != nil {
-			return domain.Task{}, err
+		deadlineChanged = !sameTimePtr(task.DeadlineAt, cmd.DeadlineAt.Value)
+		if deadlineChanged {
+			if err := task.UpdateDeadline(cmd.DeadlineAt.Value, now); err != nil {
+				return domain.Task{}, err
+			}
+			changed = true
 		}
-		changed = true
 	}
 	if !changed {
 		return task, nil
+	}
+
+	if deadlineChanged {
+		if err := s.reminders.RecalculatePendingBeforeDeadline(ctx, task.ID, task.DeadlineAt); err != nil {
+			return domain.Task{}, fmt.Errorf("sync reminders after deadline update: %w", err)
+		}
 	}
 
 	updated, err := s.tasks.Update(ctx, task)
@@ -156,7 +210,48 @@ func (s *TaskService) UpdateTask(ctx context.Context, cmd command.UpdateTaskComm
 	return updated, nil
 }
 
+func (s *TaskService) ReassignTask(ctx context.Context, cmd command.ReassignTaskCommand) (domain.Task, error) {
+	if err := requireActor(cmd.ActorID); err != nil {
+		return domain.Task{}, err
+	}
+
+	task, err := s.tasks.FindByID(ctx, cmd.TaskID)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("reassign task: %w", err)
+	}
+	if cmd.ActorID != task.CreatorID {
+		return domain.Task{}, application.ErrTaskAccessDenied
+	}
+	if cmd.NewAssigneeID == task.AssigneeID {
+		return task, nil
+	}
+	if err := s.reassignLoadedTask(ctx, cmd.ActorID, &task, cmd.NewAssigneeID, s.now().UTC()); err != nil {
+		return domain.Task{}, err
+	}
+
+	updated, err := s.tasks.Update(ctx, task)
+	if err != nil {
+		return domain.Task{}, fmt.Errorf("reassign task: %w", err)
+	}
+
+	return updated, nil
+}
+
 func (s *TaskService) ChangeStatus(ctx context.Context, cmd command.ChangeStatusCommand) (domain.Task, error) {
+	var updated domain.Task
+	err := s.transactions.WithinTransaction(ctx, func(txCtx context.Context) error {
+		var err error
+		updated, err = s.changeStatus(txCtx, cmd)
+		return err
+	})
+	if err != nil {
+		return domain.Task{}, err
+	}
+
+	return updated, nil
+}
+
+func (s *TaskService) changeStatus(ctx context.Context, cmd command.ChangeStatusCommand) (domain.Task, error) {
 	if err := requireActor(cmd.ActorID); err != nil {
 		return domain.Task{}, err
 	}
@@ -170,6 +265,12 @@ func (s *TaskService) ChangeStatus(ctx context.Context, cmd command.ChangeStatus
 	}
 	if err := task.ChangeStatus(cmd.Status, s.now().UTC()); err != nil {
 		return domain.Task{}, err
+	}
+
+	if task.Status.IsCompleted() {
+		if err := s.reminders.CancelPending(ctx, task.ID); err != nil {
+			return domain.Task{}, fmt.Errorf("cancel reminders after task completion: %w", err)
+		}
 	}
 
 	updated, err := s.tasks.Update(ctx, task)
@@ -238,4 +339,30 @@ func requireActor(actorID uuid.UUID) error {
 
 func canView(actorID uuid.UUID, task domain.Task) bool {
 	return actorID == task.CreatorID || actorID == task.AssigneeID
+}
+
+func sameTimePtr(left *time.Time, right *time.Time) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+
+	return left.Equal(*right)
+}
+
+func (s *TaskService) reassignLoadedTask(ctx context.Context, actorID uuid.UUID, task *domain.Task, assigneeID uuid.UUID, now time.Time) error {
+	if assigneeID == uuid.Nil {
+		return domain.ErrInvalidAssigneeID
+	}
+	allowed, err := s.assignments.CanAssign(ctx, actorID, assigneeID)
+	if err != nil {
+		return fmt.Errorf("authorize task assignment: %w", err)
+	}
+	if !allowed {
+		return application.ErrAssignmentDenied
+	}
+	if err := task.Reassign(assigneeID, now); err != nil {
+		return err
+	}
+
+	return nil
 }

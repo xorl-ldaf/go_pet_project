@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 
+	"go_pet_project/internal/platform/database"
 	taskout "go_pet_project/internal/task/application/port/out"
 	"go_pet_project/internal/task/domain"
 
@@ -28,7 +29,7 @@ func (r *Repository) Create(ctx context.Context, task domain.Task) (domain.Task,
 		return domain.Task{}, err
 	}
 
-	if err := r.db.WithContext(ctx).Create(&model).Error; err != nil {
+	if err := database.GORMFromContext(ctx, r.db).WithContext(ctx).Create(&model).Error; err != nil {
 		return domain.Task{}, fmt.Errorf("create task: %w", err)
 	}
 
@@ -42,7 +43,7 @@ func (r *Repository) Create(ctx context.Context, task domain.Task) (domain.Task,
 
 func (r *Repository) FindByID(ctx context.Context, id uuid.UUID) (domain.Task, error) {
 	var model taskModel
-	if err := r.db.WithContext(ctx).First(&model, "id = ?", id).Error; err != nil {
+	if err := database.GORMFromContext(ctx, r.db).WithContext(ctx).First(&model, "id = ?", id).Error; err != nil {
 		return domain.Task{}, mapFindError("find task by id", err)
 	}
 
@@ -72,7 +73,7 @@ func (r *Repository) Update(ctx context.Context, task domain.Task) (domain.Task,
 		"archived_at":  model.ArchivedAt,
 	}
 
-	result := r.db.WithContext(ctx).Model(&taskModel{}).Where("id = ?", model.ID).Updates(updates)
+	result := database.GORMFromContext(ctx, r.db).WithContext(ctx).Model(&taskModel{}).Where("id = ?", model.ID).Updates(updates)
 	if result.Error != nil {
 		return domain.Task{}, fmt.Errorf("update task: %w", result.Error)
 	}
@@ -84,7 +85,7 @@ func (r *Repository) Update(ctx context.Context, task domain.Task) (domain.Task,
 }
 
 func (r *Repository) List(ctx context.Context, filter taskout.TaskFilter) ([]domain.Task, error) {
-	query, err := applyFilter(r.db.WithContext(ctx).Model(&taskModel{}), filter)
+	query, err := applyFilter(database.GORMFromContext(ctx, r.db).WithContext(ctx).Model(&taskModel{}), filter)
 	if err != nil {
 		return nil, err
 	}

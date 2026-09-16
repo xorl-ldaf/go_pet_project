@@ -1,0 +1,8 @@
+.git
+.github
+.env
+deploy/grafana/data
+tmp
+bin
+coverage.out
+*.test
