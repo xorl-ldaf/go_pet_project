@@ -8,6 +8,6 @@ bin/
 tmp/
 coverage.out
 *.test
-api
-scheduler
-notifier
+/api
+/scheduler
+/notifier
