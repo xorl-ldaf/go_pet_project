@@ -1,0 +1,161 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 0,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "targets": [
+        {
+          "expr": "sum(rate(todo_http_requests_total[5m])) by (route, status)",
+          "legendFormat": "{{route}} {{status}}"
+        }
+      ],
+      "title": "HTTP rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(todo_http_request_duration_seconds_bucket[5m])) by (le, route))",
+          "legendFormat": "p95 {{route}}"
+        }
+      ],
+      "title": "HTTP p95 latency",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "sum(rate(todo_reminders_processed_total[5m]))",
+          "legendFormat": "reminders"
+        },
+        {
+          "expr": "sum(rate(todo_recurrence_occurrences_generated_total[5m]))",
+          "legendFormat": "recurrence"
+        }
+      ],
+      "title": "Scheduler throughput",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "sum(rate(todo_kafka_events_published_total[5m]))",
+          "legendFormat": "published"
+        },
+        {
+          "expr": "sum(rate(todo_kafka_consumer_processed_total[5m]))",
+          "legendFormat": "consumed"
+        }
+      ],
+      "title": "Kafka",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "Prometheus"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "sum(rate(todo_notifications_created_total[5m]))",
+          "legendFormat": "notifications"
+        },
+        {
+          "expr": "sum(rate(todo_telegram_delivery_success_total[5m]))",
+          "legendFormat": "telegram success"
+        },
+        {
+          "expr": "sum(rate(todo_telegram_delivery_failure_total[5m]))",
+          "legendFormat": "telegram failure"
+        }
+      ],
+      "title": "Notifications",
+      "type": "timeseries"
+    }
+  ],
+  "refresh": "10s",
+  "schemaVersion": 39,
+  "tags": ["todo-go"],
+  "templating": {
+    "list": []
+  },
+  "time": {
+    "from": "now-30m",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "",
+  "title": "Todo Go Overview",
+  "uid": "todo-go-overview",
+  "version": 1,
+  "weekStart": ""
+}
